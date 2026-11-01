@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Models are downloaded automatically on the first run (~200 MB)
+models/
+*.part
+
+# Local secrets (e.g. LLM_API_KEY)
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

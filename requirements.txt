@@ -1,0 +1,7 @@
+mediapipe>=0.10.20
+opencv-python>=4.9
+onnxruntime>=1.18
+numpy>=1.26
+# modo escuta (microfone -> texto)
+faster-whisper>=1.0
+sounddevice>=0.4
