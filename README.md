@@ -140,7 +140,7 @@ terminal.
 
 ```powershell
 $env:LLM_API_KEY = "your-key"
-$env:LLM_MODEL = "openai/gpt-4o-mini"   # optional, this is the default
+$env:LLM_MODEL = "nvidia/nemotron-3.5-super-vl:free" 
 python signvoice.py
 ```
 
@@ -148,25 +148,9 @@ python signvoice.py
 
 ```bash
 export LLM_API_KEY="your-key"
+export LLM_MODEL="nvidia/nemotron-3.5-super-vl:free" 
 python signvoice.py
 ```
-
-**Local model with Ollama (no key needed):**
-
-```bash
-export LLM_BASE_URL="http://localhost:11434/v1"
-export LLM_MODEL="llama3.1"
-python signvoice.py
-```
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `LLM_API_KEY` | (empty) | API key. The LLM is off without it, unless the URL is local. |
-| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible endpoint |
-| `LLM_MODEL` | `openai/gpt-4o-mini` | Model name |
-
-With the LLM on, a request is sent each time a sign is added, so the preview stays up to date.
-
 ---
 
 ## Useful options
