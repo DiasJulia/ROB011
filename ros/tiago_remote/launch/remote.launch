@@ -1,22 +1,15 @@
 <launch>
-  <!-- Web remote: open http://localhost:<port>/ on the PC or http://<PC-IP>:<port>/ on the phone -->
+  <!-- Web remote: http://localhost:<port>/ on the PC, http://<PC-IP>:<port>/ on the phone.
+       Translator: run signvoice.py with the server option, URL ws://localhost:<port>/ws/translator -->
   <arg name="port"          default="8080"/>
   <arg name="cmd_vel_topic" default="/phone_vel"/>  <!-- twist_mux input reserved for phones (priority 98) -->
   <arg name="max_linear"    default="1.0"/>          <!-- m/s (TIAGo base limit: 1.0 forward, 0.2 backward) -->
   <arg name="max_angular"   default="1.5"/>          <!-- rad/s -->
-  <arg name="use_ros_camera" default="false"/>      <!-- false: webcam via signvoice_robot.py | true: ROS camera (sim / Xtion) -->
-  <arg name="detector"      default="none"/>         <!-- none (faces from signvoice_robot) | opencv (Xtion) | sim (Gazebo dummy) -->
-  <arg name="fake_signs"    default="false"/>        <!-- true = demo captions while translating -->
 
   <node pkg="tiago_remote" type="remote_server.py" name="tiago_remote" output="screen">
     <param name="port"          value="$(arg port)"/>
     <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
     <param name="max_linear"    value="$(arg max_linear)"/>
     <param name="max_angular"   value="$(arg max_angular)"/>
-    <param name="use_ros_camera" value="$(arg use_ros_camera)"/>
   </node>
-
-  <node if="$(eval detector == 'opencv')" pkg="tiago_remote" type="face_detector.py"     name="face_detector" output="screen"/>
-  <node if="$(eval detector == 'sim')"    pkg="tiago_remote" type="sim_face_detector.py" name="face_detector" output="screen"/>
-  <node if="$(arg fake_signs)"            pkg="tiago_remote" type="fake_signs.py"        name="fake_signs"    output="screen"/>
 </launch>

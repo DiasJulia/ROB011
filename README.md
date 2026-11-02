@@ -192,6 +192,26 @@ Run `python signvoice.py --help` for the full list.
 
 ---
 
+## Running on the TIAGo robot (phone remote)
+
+On the robot, `signvoice.py` runs full screen on the notebook's screen, and a phone controls both the
+robot (joystick) and the conversation (Talk/Listen, Undo, Clear, Speak, × on a sign, LLM, full screen).
+The ROS side is in [`ros/tiago_remote`](ros/tiago_remote/README.md).
+
+```bash
+roslaunch tiago_remote remote.launch                                   # ROS Noetic (WSL on the notebook)
+python signvoice.py --server ws://127.0.0.1:8080/ws/translator --fullscreen
+```
+
+Then open `http://<notebook-IP>:8080` on the phone. With `--server`, the pointing gestures are off by
+default (ASL signs such as YOU / ME / THERE also point); add `--gestures` to keep them.
+Without `--server`, signvoice works exactly as described above.
+
+**Full step-by-step guide** (WSL + ROS installation, simulation, powering and connecting to the robot,
+networking, phone, troubleshooting): [docs/TIAGO_GUIDE.md](docs/TIAGO_GUIDE.md)
+
+---
+
 ## Credits
 
 - Sign recognition model and pipeline contract: [signchat](https://github.com/nlevites/signchat) (MIT),

@@ -14,6 +14,7 @@ Listen mode ("Mode" button): microphone -> faster-whisper (local) -> on-screen t
 
 Usage:  python signvoice.py          (downloads the models on first run)
         python signvoice.py --help
+        python signvoice.py --server ws://127.0.0.1:8080/ws/translator   (TIAGo robot: phone remote)
 """
 from __future__ import annotations
 
@@ -591,6 +592,76 @@ class Listener(threading.Thread):
 
 
 # =============================================================================
+# 6c. Optional remote control (TIAGo robot): phone <-> tiago_remote server <-> here
+# =============================================================================
+class RemoteLink(threading.Thread):
+    """Only used with --server. Sends the conversation state to the tiago_remote server
+    (shown on the phone) and receives the phone's buttons, which run the same actions
+    as the on-screen buttons. Reconnects automatically. Needs: pip install websocket-client"""
+
+    def __init__(self, url: str):
+        super().__init__(daemon=True)
+        try:
+            import websocket
+        except ImportError:
+            raise SystemExit("--server needs: pip install websocket-client")
+        self.websocket = websocket
+        self.url = url
+        self.ws = None
+        self.lock = threading.Lock()
+        self.inbox: queue.Queue = queue.Queue()
+        self.last = ""
+        self.last_t = 0.0
+
+    def run(self):
+        fails = 0
+        while True:
+            try:
+                ws = self.websocket.create_connection(self.url, timeout=5)
+                fails = 0
+                ws.settimeout(None)
+                with self.lock:
+                    self.ws, self.last = ws, ""          # resend the full state after reconnecting
+                print(f"[remote] connected to {self.url}", flush=True)
+                while True:
+                    msg = ws.recv()
+                    if not msg:
+                        break
+                    m = json.loads(msg)
+                    if m.get("type") == "action":
+                        self.inbox.put(m)
+            except Exception as e:  # noqa: BLE001
+                if self.ws is not None:
+                    print(f"[remote] disconnected ({e}); retrying...", flush=True)
+                else:
+                    fails += 1
+                    if fails == 1 or fails % 15 == 0:      # say why, without flooding the terminal
+                        print(f"[remote] cannot reach {self.url} ({e}); retrying...", flush=True)
+            with self.lock:
+                self.ws = None
+            time.sleep(1.0)
+
+    def actions(self) -> list[dict]:
+        out = []
+        while not self.inbox.empty():
+            out.append(self.inbox.get())
+        return out
+
+    def publish(self, state: dict) -> None:
+        """Sends the state when it changes (and at least every 2 s)."""
+        data = json.dumps({"type": "state", **state})
+        now = time.monotonic()
+        with self.lock:
+            if self.ws is None or (data == self.last and now - self.last_t < 2.0):
+                return
+            try:
+                self.ws.send(data)
+                self.last, self.last_t = data, now
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# =============================================================================
 # 7. Interface (OpenCV) and gesture control
 # =============================================================================
 # camera region (normalized x0, y0, x1, y1, already mirrored) the index finger sweeps
@@ -938,6 +1009,11 @@ def main() -> None:
                     help="Whisper model for listen mode (tiny, base, small, medium...)")
     ap.add_argument("--stt-lang", default="en",
                     help="spoken language in listen mode (en, pt, fr...; empty = auto-detect)")
+    ap.add_argument("--server", default="",
+                    help="TIAGo robot: tiago_remote WebSocket, e.g. ws://127.0.0.1:8080/ws/translator "
+                         "(buttons also on the phone; pointing gestures off unless --gestures)")
+    ap.add_argument("--gestures", action="store_true",
+                    help="keep the pointing gestures on when --server is used")
     args = ap.parse_args()
 
     global VOICE_LANG, VOICE_NAME
@@ -963,6 +1039,11 @@ def main() -> None:
                         on_text=lambda text: worker.remember("them", text),
                         is_muted=lambda: worker.busy)    # do not transcribe our own voice
     listener.start()
+    link = RemoteLink(args.server) if args.server else None
+    if link:
+        link.start()
+    # with the phone remote, pointing is off by default: ASL signs like YOU/ME/THERE point too
+    gestures = not args.server or args.gestures
     listening = args.mode == "listen"
     listener.set_active(listening)
     admitter = Admitter(args.top1, args.top2, use_band=worker.use_llm and not args.no_band)
@@ -1050,7 +1131,7 @@ def main() -> None:
         mirror = not args.no_mirror
 
         # gesture cursor: pointing index finger (smoothed)
-        tip = pointing_tip(hands, frame.shape[1], frame.shape[0])
+        tip = pointing_tip(hands, frame.shape[1], frame.shape[0]) if gestures else None
         if tip:
             pos = to_screen(tip, mirror, canvas_size)
             cursor = pos if cursor is None else (int(0.6 * cursor[0] + 0.4 * pos[0]),
@@ -1115,6 +1196,26 @@ def main() -> None:
             ring.clear()
             admitter.boundary()
             top = []
+        if link:
+            # phone buttons -> the same actions as the on-screen buttons
+            for m in link.actions():
+                a, v = m.get("action"), m.get("value")
+                if (a == "mode" and v is not None and (v == "listen") == listening) or \
+                   (a == "llm" and v is not None and bool(v) == worker.use_llm) or \
+                   (a == "fullscreen" and v is not None and bool(v) == fullscreen):
+                    continue                    # already in the requested state
+                if a in ("mode", "speak", "undo", "clear", "del", "llm", "fullscreen"):
+                    actions.append(Target(a, (0, 0, 0, 0), arg=int(m.get("arg", -1))))
+            link.publish({
+                "mode": "listen" if listening else "talk",
+                "tokens": [dictionary_label(t.label).upper() for t in tokens],
+                "sentence": sentence, "pending": bool(tokens),
+                "heard": listener.lines[-1] if listener.lines else "",
+                "listen_status": listener.status,
+                "history": [list(h) for h in list(worker.history)[-30:]],
+                "llm": worker.use_llm, "llm_available": bool(llm and llm.available),
+                "fullscreen": fullscreen, "speaking": worker.busy,
+            })
         if not all([run_action(t) for t in actions]):
             break
 

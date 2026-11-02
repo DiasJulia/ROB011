@@ -5,3 +5,5 @@ numpy>=1.26
 # modo escuta (microfone -> texto)
 faster-whisper>=1.0
 sounddevice>=0.4
+# robot integration (only for --server)
+websocket-client>=1.6

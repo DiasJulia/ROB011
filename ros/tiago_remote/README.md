@@ -1,48 +1,44 @@
-# tiago_remote (v0.4)
+# tiago_remote (v0.5)
 
-Phone web remote for TIAGo (ROS Noetic). Two tabs:
+> Full setup, robot connection and troubleshooting: [docs/TIAGO_GUIDE.md](../../docs/TIAGO_GUIDE.md)
+
+Phone web remote for TIAGo (ROS Noetic), working together with `signvoice.py` (repository root).
 
 - **Drive** — joystick → `/phone_vel` (twist_mux input). Max 1.0 m/s, 1.5 rad/s.
-- **Translate** — live camera with face box, head arrows + "Find face", live captions.
-  Signs are recognised only while a face is in view (no calibration step).
+- **Conversation** — remote for the translator running on the robot's notebook: Talk / Listen,
+  recognised signs (× to delete one), Undo, Clear, Speak, history (You / Them), LLM on/off, full screen.
+  The robot's screen shows the original signvoice window (camera, signs, history).
 
-## Install / update
+## Install
 
 ```bash
-sudo apt install -y python3-tornado python3-opencv opencv-data unzip
-cd ~/tiago_public_ws/src && unzip <path>/tiago_remote_v2.zip
+sudo apt install -y python3-tornado
+cp -r ros/tiago_remote ~/tiago_public_ws/src/      # or symlink it
 cd ~/tiago_public_ws && catkin build tiago_remote && source devel/setup.bash
 ```
 
-## Test in simulation (with a dummy person)
+## Run
 
 ```bash
-# terminal 1
+# 1. (optional) simulation
 roslaunch tiago_2dnav_gazebo tiago_navigation.launch public_sim:=true lost:=false end_effector:=pal-gripper
-# terminal 2 (after Gazebo is up)
-roslaunch tiago_remote sim_test.launch          # person_x:=2.0 person_y:=0.5 to move the person
+# 2. web remote
+roslaunch tiago_remote remote.launch
 ```
-
-Open http://localhost:8080. The dummy person can be moved in Gazebo with the "translate" tool (T).
-
-## With the webcam + sign recogniser (real robot, or your PC)
 
 ```bash
-roslaunch tiago_remote remote.launch                         # server (WSL / robot notebook)
-python signvoice_robot.py --show                             # in the signvoice folder (Python 3.12 venv)
+# 3. translator (repository root, Python 3.12 venv, pip install websocket-client)
+python signvoice.py --server ws://127.0.0.1:8080/ws/translator --fullscreen
 ```
 
-- phone: http://<PC-IP>:8080/   ·   robot screen: http://localhost:8080/screen.html (Full screen)
-- `signvoice_robot.py` connects to `ws://localhost:8080/ws/recognizer` (use `--server` for another host)
+Open `http://localhost:8080` (PC) or `http://<PC-IP>:8080` (phone, same Wi-Fi).
+
+With `--server`, the pointing gestures are off by default (ASL signs such as YOU / ME / THERE also point);
+add `--gestures` to keep them. Keyboard and mouse still work on the notebook.
 
 ## ROS interface
 
-| Topic / action | Type | Dir | |
+| Topic | Type | Dir | |
 |---|---|---|---|
-| `/phone_vel` | geometry_msgs/Twist | out | joystick |
-| `/robot_mode` | std_msgs/String (latched) | out | drive / translate |
-| `/translation_active` | std_msgs/Bool (latched) | out | translate mode **and** person in view → the sign recogniser should run only when true |
-| `/head_controller/point_head_action` | control_msgs/PointHead | out | head arrows, find face |
-| `/head_controller/command` | trajectory_msgs/JointTrajectory | out | head reset (dir "center") |
-| `/person/face` | std_msgs/String JSON | in | `{"visible", "u", "v", "w", "h"}` normalised |
-| `/sign/caption`, `/sign/glosses` | std_msgs/String | in | text shown in Translate |
+| `/phone_vel` | geometry_msgs/Twist | out | joystick (published only while in use) |
+| `/conversation/history` | std_msgs/String (latched) | out | JSON `[["you" \| "them", text], ...]` |
