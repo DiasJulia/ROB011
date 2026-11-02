@@ -1,0 +1,17 @@
+<launch>
+  <!-- Test everything in Gazebo (run AFTER the TIAGo simulation is up):
+       spawns a dummy person in front of the robot + web remote + simulated face detector + demo captions -->
+  <arg name="person_x"   default="1.8"/>
+  <arg name="person_y"   default="0.0"/>
+  <arg name="person_yaw" default="3.1416"/>   <!-- 3.14 = facing the robot -->
+
+  <node pkg="gazebo_ros" type="spawn_model" name="spawn_person" output="screen"
+        args="-sdf -file $(find tiago_remote)/models/person/model.sdf -model person
+              -x $(arg person_x) -y $(arg person_y) -Y $(arg person_yaw)"/>
+
+  <include file="$(find tiago_remote)/launch/remote.launch">
+    <arg name="detector"   value="sim"/>
+    <arg name="use_ros_camera" value="true"/>
+    <arg name="fake_signs" value="true"/>
+  </include>
+</launch>

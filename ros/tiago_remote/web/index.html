@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>TIAGo Remote</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#15171c; --card:#1e2128; --text:#f2f3f5; --sec:#8a909c; --sep:#2b2f38;
+    --blue:#ff7a1a; --onAccent:#15171c; --green:#34d399; --red:#ff4d5e; --orange:#fbbf24; --fill:#262a32;
+    --shadow:none;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none}
+  html,body{height:100%}
+  body{margin:0; background:var(--bg); color:var(--text); overflow:hidden;
+       font:17px/1.3 "Space Grotesk", system-ui, sans-serif}
+  .app{height:100dvh; max-width:440px; margin:0 auto; display:flex; flex-direction:column;
+       padding:max(10px,env(safe-area-inset-top)) 16px max(12px,env(safe-area-inset-bottom)); gap:12px}
+
+  /* header */
+  .top{display:flex; align-items:flex-end; justify-content:space-between; padding-top:6px}
+  h1{font-size:34px; font-weight:700; letter-spacing:-.02em; margin:0}
+  .status{display:flex; flex-direction:column; align-items:flex-end; gap:3px; font-size:13px; color:var(--sec)}
+  .status span{display:inline-flex; align-items:center; gap:6px}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--green)}
+  .dot.warn{background:var(--orange)} .dot.off{background:var(--sec)}
+
+  /* segmented control */
+  .seg{display:grid; grid-template-columns:repeat(2,1fr); background:var(--fill); border-radius:9px; padding:2px; position:relative}
+  .seg button{position:relative; z-index:1; border:0; background:none; font:600 13px/1 inherit; font-family:inherit;
+              color:var(--text); padding:9px 0; border-radius:7px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:5px}
+  .seg button:disabled{color:var(--sec); cursor:not-allowed}
+  .seg button.on{color:var(--onAccent)}
+  .seg .thumb{position:absolute; top:2px; bottom:2px; left:2px; width:calc((100% - 4px)/2); background:var(--blue);
+              border-radius:7px; box-shadow:0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04); transition:transform .25s cubic-bezier(.3,.7,.4,1)}
+  .lock{width:11px; height:11px}
+
+  /* views */
+  .view{display:none; flex:1; flex-direction:column; gap:12px; min-height:0}
+  .view.active{display:flex}
+  .card{background:var(--card); border-radius:16px; border:1px solid var(--sep)}
+  .caption-sm{font-size:13px; color:var(--sec); padding:0 4px}
+
+  /* ---------- DRIVE ---------- */
+  .pad{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:18px}
+  .joy{--s:min(58vw, 32dvh, 240px); width:var(--s); height:var(--s); border-radius:50%; position:relative;
+       background:var(--fill); touch-action:none; cursor:grab}
+  .joy::before{content:""; position:absolute; inset:22%; border-radius:50%; border:1px solid var(--sep)}
+  .knob{position:absolute; left:50%; top:50%; width:34%; height:34%; transform:translate(-50%,-50%); border-radius:50%;
+        background:var(--blue); box-shadow:0 4px 18px rgba(255,122,26,.45); transition:transform .18s ease}
+  .knob.drag{transition:none}
+  .jwrap{position:relative; padding:22px 52px}
+  .jl{position:absolute; font-size:11px; font-weight:600; letter-spacing:.1em; color:var(--sec)}
+  .jl.f{top:0; left:50%; transform:translateX(-50%)} .jl.b{bottom:0; left:50%; transform:translateX(-50%)}
+  .jl.l{left:0; top:50%; transform:translateY(-50%)} .jl.r{right:0; top:50%; transform:translateY(-50%)}
+  .vals{display:flex; gap:24px; font-size:15px; color:var(--sec); font-variant-numeric:tabular-nums}
+  .vals b{color:var(--text); font-weight:600}
+  .row{display:flex; align-items:center; gap:12px; padding:13px 16px}
+  .row + .row{border-top:.5px solid var(--sep)}
+  .row label{flex:none; font-size:17px}
+  .row .val{margin-left:auto; color:var(--sec); font-variant-numeric:tabular-nums; min-width:70px; text-align:right}
+  input[type=range]{-webkit-appearance:none; appearance:none; flex:1; height:4px; border-radius:2px;
+       background:linear-gradient(90deg, var(--blue) var(--p,50%), var(--fill) var(--p,50%))}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:28px; height:28px; border-radius:50%;
+       background:#fff; box-shadow:0 2px 6px rgba(0,0,0,.25), 0 0 0 .5px rgba(0,0,0,.08)}
+  input[type=range]::-moz-range-thumb{width:26px; height:26px; border-radius:50%; background:#fff; border:0; box-shadow:0 2px 6px rgba(0,0,0,.25)}
+
+  /* ---------- CAMERA ---------- */
+  .cam{position:relative; aspect-ratio:4/3; border-radius:14px; overflow:hidden; background:#1c1c1e}
+  .cam .scene{position:absolute; inset:-20%;
+              background:radial-gradient(ellipse at 50% 120%, #3a3a3c 0%, #2c2c2e 45%, #1c1c1e 80%)}
+  .person{position:absolute; left:50%; top:50%; width:46%; transform:translate(-50%,-30%)}
+  .facebox{position:absolute; border:2px solid var(--orange); border-radius:10px; transition:all .35s ease}
+  .facebox.ok{border-color:var(--green)}
+  .facebox.gone{opacity:0}
+  .cross{position:absolute; left:50%; top:50%; width:22px; height:22px; transform:translate(-50%,-50%); opacity:.6}
+  .cross::before,.cross::after{content:""; position:absolute; background:#fff}
+  .cross::before{left:50%; top:0; bottom:0; width:1px} .cross::after{top:50%; left:0; right:0; height:1px}
+  .tag{position:absolute; left:10px; top:10px; background:rgba(0,0,0,.55); color:#fff; backdrop-filter:blur(10px);
+       -webkit-backdrop-filter:blur(10px); font-size:12px; font-weight:600; padding:5px 9px; border-radius:999px;
+       display:flex; align-items:center; gap:6px}
+  .headctl{display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; padding:12px 14px}
+  .dpad{display:grid; grid-template-columns:repeat(3,44px); grid-template-rows:repeat(3,44px); gap:4px}
+  .dpad button{border:0; border-radius:10px; background:var(--fill); color:var(--blue); font-size:18px; cursor:pointer}
+  .dpad button:active{background:var(--sep)}
+  .dpad .c{font-size:11px; font-weight:600}
+  .angles{display:flex; flex-direction:column; gap:6px; font-size:15px; color:var(--sec); font-variant-numeric:tabular-nums}
+  .angles b{color:var(--text); font-weight:600}
+  .btn{border:0; border-radius:12px; padding:14px; font:600 17px/1 inherit; font-family:inherit; cursor:pointer; width:100%}
+  .btn.primary{background:var(--blue); color:var(--onAccent)}
+  .btn.primary:disabled{background:var(--fill); color:var(--sec); cursor:not-allowed}
+  .btn.plain{background:none; color:var(--blue); padding:8px}
+  .two{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+  .btn.tinted{background:rgba(255,122,26,.14); color:var(--blue)}
+
+  /* ---------- SIGN ---------- */
+  .sign{flex:1; padding:20px; display:flex; flex-direction:column; gap:14px}
+  .live{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:var(--green)}
+  .live .pulse{width:8px; height:8px; border-radius:50%; background:var(--green); animation:p 1.4s infinite}
+  .live.paused{color:var(--orange)} .live.paused .pulse{background:var(--orange); animation:none}
+  @keyframes p{0%{box-shadow:0 0 0 0 rgba(52,199,89,.5)}100%{box-shadow:0 0 0 10px rgba(52,199,89,0)}}
+  .sentence{font-size:30px; font-weight:700; letter-spacing:-.01em; line-height:1.15; min-height:2.4em}
+  .chips{display:flex; flex-wrap:wrap; gap:6px}
+  .chip{font-size:13px; font-weight:500; padding:5px 10px; border-radius:999px; background:var(--fill); color:var(--sec)}
+  .chip.new{background:rgba(255,122,26,.16); color:var(--blue)}
+
+  /* stop */
+  .stop{flex:none; border:0; border-radius:14px; background:rgba(255,77,94,.14); color:var(--red);
+        font:600 17px/1 inherit; font-family:inherit; padding:15px; cursor:pointer}
+  .stop:active{background:var(--red); color:#fff}
+  .toast{position:fixed; left:50%; top:16px; transform:translate(-50%,-80px); background:var(--card); color:var(--text);
+         box-shadow:0 8px 30px rgba(0,0,0,.5); border:1px solid var(--sep); border-radius:999px; padding:10px 18px; font-size:15px; font-weight:600;
+         transition:transform .3s cubic-bezier(.3,.7,.4,1); z-index:9}
+  .toast.show{transform:translate(-50%,0)}
+
+  /* live camera */
+  .cam img{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block}
+  .cam .wait{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--sec); font-size:14px}
+  .offline .view, .offline .seg{opacity:.4; pointer-events:none}
+
+  /* translate tab: camera on top, controls, captions below */
+  .cam{flex:none; max-height:38dvh; aspect-ratio:4/3; align-self:center; width:100%}
+  .ctl{display:flex; gap:6px; align-items:center}
+  .ctl button{flex:1; height:40px; border:0; border-radius:10px; background:var(--fill); color:var(--blue);
+              font:600 14px/1 inherit; font-family:inherit; cursor:pointer}
+  .ctl button:active{background:var(--sep)}
+  .ctl .find{flex:2.4; font-size:13px}
+  .sign{flex:1; padding:16px 18px; gap:10px; min-height:0}
+  .sentence{font-size:26px; min-height:2.3em}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+  <div class="top">
+    <h1>TIAGo</h1>
+    <div class="status">
+      <span><i class="dot off" id="connDot"></i><span id="connText">Connecting…</span></span>
+      <span><i class="dot off" id="faceDot"></i><span id="faceText">Recogniser offline</span></span>
+    </div>
+  </div>
+
+  <div class="seg" id="seg">
+    <span class="thumb" id="thumb"></span>
+    <button data-mode="drive" class="on">Drive</button>
+    <button data-mode="translate">Translate</button>
+  </div>
+
+  <!-- DRIVE -->
+  <section class="view active" id="view-drive">
+    <div class="card pad">
+      <div class="jwrap"><span class="jl f">FORWARD</span><span class="jl b">BACKWARD</span><span class="jl l">LEFT</span><span class="jl r">RIGHT</span><div class="joy" id="joy"><div class="knob" id="knob"></div></div></div>
+      <div class="vals"><span>Speed <b id="lin">0.00</b> m/s</span><span>Turn <b id="ang">0.00</b> rad/s</span></div>
+    </div>
+    <div class="card">
+      <div class="row"><label>Max speed</label><input type="range" id="speed" min="0.05" max="1" step="0.05" value="0.5"><span class="val" id="speedVal">0.50 m/s</span></div>
+    </div>
+  </section>
+
+  <!-- TRANSLATE: camera + head + captions in one screen -->
+  <section class="view" id="view-translate">
+    <div class="cam" id="cam">
+      <div class="wait" id="camWait">Waiting for the camera…</div>
+      <img id="camImg" alt="">
+      <div class="facebox gone" id="facebox"></div>
+      <div class="tag" id="camTag"><i class="dot warn"></i>Looking for a face…</div>
+    </div>
+    <div class="ctl">
+      <button data-d="left" aria-label="look left">◀</button>
+      <button data-d="up" aria-label="look up">▲</button>
+      <button data-d="down" aria-label="look down">▼</button>
+      <button data-d="right" aria-label="look right">▶</button>
+      <button class="find" id="findFace">Find face</button>
+    </div>
+    <div class="card sign">
+      <div class="live paused" id="live"><i class="pulse"></i><span id="liveText">Paused — no face in view</span></div>
+      <div class="sentence" id="sentence"></div>
+      <div class="chips" id="chips"></div>
+    </div>
+  </section>
+
+  <button class="stop" id="stop">Stop</button>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+/* ===== TIAGo Remote — phone UI <-> tiago_remote server (WebSocket) ===== */
+const $=id=>document.getElementById(id);
+const ORDER=['drive','translate'];
+let ws=null, mode='drive', lastFrameUrl=null;
+
+/* ---------- connection ---------- */
+function send(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
+function setOnline(on){
+  $('app').classList.toggle('offline',!on);
+  $('connDot').className='dot'+(on?'':' off');
+  if(!on){ $('connText').textContent='Offline — reconnecting…'; releaseJoy(false); }
+}
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  ws.binaryType='blob';
+  ws.onopen=()=>setOnline(true);
+  ws.onclose=()=>{ setOnline(false); setTimeout(connect,1000); };
+  ws.onmessage=e=>{
+    if(typeof e.data!=='string'){ showFrame(e.data); return; }
+    const m=JSON.parse(e.data);
+    if(m.type==='status') applyStatus(m);
+    else if(m.type==='caption') showCaption(m.caption,m.glosses);
+    else if(m.type==='toast') toast(m.text);
+    else if(m.type==='pong') $('connText').textContent='Connected · '+Math.round(performance.now()-m.t)+' ms';
+  };
+}
+setInterval(()=>send({type:'ping',t:performance.now()}),1000);
+connect();
+
+/* ---------- status from the robot ---------- */
+function applyStatus(m){
+  if(m.mode!==mode) showMode(m.mode);
+  // header: recogniser / face
+  if(m.recognizer===false && !m.visible){ $('faceDot').className='dot off'; $('faceText').textContent='Recogniser offline'; }
+  else if(m.visible){ $('faceDot').className='dot'; $('faceText').textContent='Face in view'; }
+  else { $('faceDot').className='dot warn'; $('faceText').textContent='No face in view'; }
+  $('camWait').textContent = m.recognizer===false ? 'Waiting for the camera… (is signvoice_robot.py running?)' : 'Waiting for the camera…';
+  // face box: any detected face is enough
+  const fb=$('facebox');
+  if(m.face){
+    const f=m.face;
+    fb.style.left=((f.u-f.w/2)*100)+'%'; fb.style.top=((f.v-f.h/2)*100)+'%';
+    fb.style.width=(f.w*100)+'%'; fb.style.height=(f.h*100)+'%';
+    fb.className='facebox ok';
+    $('camTag').innerHTML='<i class="dot"></i>Face detected';
+  } else {
+    fb.className='facebox gone';
+    $('camTag').innerHTML='<i class="dot warn"></i>Looking for a face…';
+  }
+  $('live').classList.toggle('paused',!m.visible);
+  $('liveText').textContent=m.visible?'Reading signs':'Paused — no face in view';
+}
+
+/* ---------- modes ---------- */
+function showMode(m){
+  mode=m;
+  $('thumb').style.transform=`translateX(${ORDER.indexOf(m)*100}%)`;
+  document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('on',b.dataset.mode===m));
+  ORDER.forEach(k=>$('view-'+k).classList.toggle('active',k===m));
+  if(m!=='drive') releaseJoy(false);
+  if(m!=='translate'){ $('camImg').removeAttribute('src'); $('camWait').style.display=''; }
+}
+document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{ if(b.dataset.mode!==mode) send({type:'mode',mode:b.dataset.mode}); });
+
+/* ---------- drive ---------- */
+const speed=$('speed');
+function paint(){const p=(speed.value-speed.min)/(speed.max-speed.min)*100; speed.style.setProperty('--p',p+'%');
+  $('speedVal').textContent=(+speed.value).toFixed(2)+' m/s';}
+speed.oninput=paint; paint();
+
+const MAX_ANG=1.5; // rad/s at full deflection
+const joy=$('joy'),knob=$('knob'); let drag=false, cmd={lin:0,ang:0}, sender=null;
+function mv(e){const r=joy.getBoundingClientRect(),R=r.width*.33;let dx=e.clientX-r.left-r.width/2,dy=e.clientY-r.top-r.height/2;
+  const d=Math.hypot(dx,dy); if(d>R){dx*=R/d;dy*=R/d;}
+  knob.style.transform=`translate(calc(-50% + ${dx}px),calc(-50% + ${dy}px))`;
+  cmd.lin=(-dy/R)*speed.value; cmd.ang=(-dx/R)*MAX_ANG;
+  $('lin').textContent=cmd.lin.toFixed(2); $('ang').textContent=cmd.ang.toFixed(2);}
+function releaseJoy(notify=true){
+  drag=false; knob.classList.remove('drag'); knob.style.transform='translate(-50%,-50%)';
+  cmd={lin:0,ang:0}; $('lin').textContent='0.00'; $('ang').textContent='0.00';
+  clearInterval(sender); sender=null;
+  if(notify) send({type:'cmd',lin:0,ang:0});
+}
+joy.onpointerdown=e=>{ if(mode!=='drive')return; drag=true; knob.classList.add('drag'); joy.setPointerCapture(e.pointerId); mv(e);
+  send({type:'cmd',...cmd}); clearInterval(sender); sender=setInterval(()=>send({type:'cmd',...cmd}),100); };
+joy.onpointermove=e=>{ if(drag) mv(e); };
+['pointerup','pointercancel','lostpointercapture'].forEach(ev=>joy.addEventListener(ev,()=>{ if(drag) releaseJoy(); }));
+document.addEventListener('visibilitychange',()=>{ if(document.hidden && drag) releaseJoy(); });
+
+/* ---------- camera + head ---------- */
+function showFrame(blob){
+  if(mode!=='translate') return;
+  const url=URL.createObjectURL(blob), img=$('camImg');
+  img.onload=()=>{ if(lastFrameUrl) URL.revokeObjectURL(lastFrameUrl); lastFrameUrl=url; };
+  img.src=url; $('camWait').style.display='none';
+}
+document.querySelectorAll('.ctl [data-d]').forEach(b=>b.onclick=()=>send({type:'head',dir:b.dataset.d}));
+$('findFace').onclick=()=>send({type:'find_face'});
+
+/* ---------- captions ---------- */
+function showCaption(text,glosses){
+  $('sentence').textContent=text||'';
+  const c=$('chips'); c.innerHTML='';
+  (glosses||[]).forEach((g,i,a)=>{const s=document.createElement('span'); s.className='chip'+(i===a.length-1?' new':''); s.textContent=g; c.append(s);});
+}
+
+/* ---------- stop ---------- */
+function toast(t){const x=$('toast');x.textContent=t;x.classList.add('show');clearTimeout(x._h);x._h=setTimeout(()=>x.classList.remove('show'),1600);}
+$('stop').onclick=()=>{ releaseJoy(false); send({type:'stop'}); toast('Robot stopped'); };
+</script>
+</body>
+</html>

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIAGo Translator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{ --bg:#15171c; --card:#1e2128; --text:#f2f3f5; --sec:#8a909c; --sep:#2b2f38;
+         --accent:#ff7a1a; --green:#34d399; --amber:#fbbf24; --fill:#262a32; }
+  *{box-sizing:border-box}
+  html,body{height:100%; margin:0}
+  body{background:var(--bg); color:var(--text); font-family:"Space Grotesk",system-ui,sans-serif; overflow:hidden; cursor:none}
+  .wrap{height:100vh; display:flex; flex-direction:column; padding:3vh 4vw; gap:2vh}
+  header{display:flex; align-items:center; justify-content:space-between}
+  .brand{font-size:clamp(18px,3vh,30px); font-weight:700; letter-spacing:-.01em}
+  .brand span{color:var(--accent)}
+  .pill{display:flex; align-items:center; gap:10px; font-size:clamp(14px,2.2vh,22px); color:var(--sec);
+        background:var(--card); border:1px solid var(--sep); border-radius:999px; padding:8px 18px}
+  .dot{width:12px; height:12px; border-radius:50%; background:var(--sec)}
+  .dot.green{background:var(--green); animation:pulse 1.6s infinite} .dot.amber{background:var(--amber)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}100%{box-shadow:0 0 0 14px rgba(52,211,153,0)}}
+  main{flex:1; display:flex; flex-direction:column; justify-content:center; gap:4vh; min-height:0}
+  .sentence{font-size:clamp(36px,9vh,110px); font-weight:700; line-height:1.08; letter-spacing:-.02em;
+            overflow-wrap:anywhere}
+  .sentence.idle{color:var(--sec); font-weight:500; font-size:clamp(28px,6vh,70px)}
+  .chips{display:flex; flex-wrap:wrap; gap:12px; min-height:5vh}
+  .chip{font-size:clamp(16px,2.6vh,28px); font-weight:600; letter-spacing:.06em; padding:8px 16px; border-radius:999px;
+        background:var(--fill); color:var(--sec)}
+  .chip.new{background:rgba(255,122,26,.16); color:var(--accent)}
+  footer{font-size:clamp(12px,1.8vh,18px); color:var(--sec); display:flex; justify-content:space-between}
+  #fs{background:none; border:1px solid var(--sep); color:var(--sec); font:inherit; border-radius:999px; padding:6px 14px; cursor:pointer}
+  body:fullscreen #fs{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">TIAGo <span>Translator</span></div>
+    <div class="pill"><i class="dot" id="dot"></i><span id="state">Connecting…</span></div>
+  </header>
+  <main>
+    <div class="sentence idle" id="sentence">Hello! I translate American Sign Language.</div>
+    <div class="chips" id="chips"></div>
+  </main>
+  <footer><span>ASL → English · 250 signs</span><button id="fs">Full screen</button></footer>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let st={}, caption='', glosses=[];
+
+function render(){
+  // state pill
+  let txt, cls;
+  if(!st.mode){ txt='Offline'; cls=''; }
+  else if(st.mode!=='translate'){ txt='Not translating'; cls=''; }
+  else if(!st.visible){ txt='Paused — step in front of me'; cls='amber'; }
+  else { txt='Reading signs'; cls='green'; }
+  if(st.mode && st.recognizer===false){ txt='Sign recogniser offline'; cls='amber'; }
+  $('state').textContent=txt; $('dot').className='dot '+cls;
+
+  // sentence: live caption while translating, otherwise a hint
+  const s=$('sentence');
+  if(caption){ s.textContent=caption; s.classList.remove('idle'); }
+  else{
+    s.classList.add('idle');
+    s.textContent = st.mode==='translate' ? (st.visible ? 'I’m watching… start signing.' : 'Please stand in front of me.')
+                                          : 'Hello! I translate American Sign Language.';
+  }
+  const c=$('chips'); c.innerHTML='';
+  glosses.forEach((g,i,a)=>{const e=document.createElement('span'); e.className='chip'+(i===a.length-1?' new':''); e.textContent=g; c.append(e);});
+}
+
+function connect(){
+  const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/screen');
+  ws.onmessage=e=>{ const m=JSON.parse(e.data);
+    if(m.type==='status'){ st=m; render(); }
+    else if(m.type==='caption'){ caption=m.caption||''; glosses=m.glosses||[]; render(); } };
+  ws.onclose=()=>{ st={}; render(); setTimeout(connect,1000); };
+}
+connect(); render();
+$('fs').onclick=()=>document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+</script>
+</body>
+</html>
