@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>TIAGo Navigation</title>
+<style>
+  :root { color-scheme:dark; --bg:#15171c; --card:#1e2128; --fill:#292e38;
+          --text:#f2f3f5; --muted:#9aa1ad; --accent:#ff7a1a; --stop:#ff4d5e; }
+  * { box-sizing:border-box; user-select:none; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--text); font:17px/1.3 system-ui,sans-serif; }
+  main { height:100dvh; max-width:440px; margin:auto; padding:20px 16px;
+         display:flex; flex-direction:column; gap:12px; }
+  h1 { margin:0; font-size:32px; } p { margin:0; color:var(--muted); font-size:14px; }
+  .card { background:var(--card); border:1px solid #2b2f38; border-radius:16px; }
+  .pad { flex:1; display:flex; flex-direction:column; align-items:center;
+         justify-content:center; gap:14px; min-height:280px; }
+  .jwrap { position:relative; padding:22px 18px 22px 96px; }
+  .jl { position:absolute; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.1em; }
+  .jl.f { top:0; left:50%; transform:translateX(-50%); }
+  .jl.b { bottom:0; left:50%; transform:translateX(-50%); }
+  .turns { position:absolute; left:8px; top:50%; transform:translateY(-50%);
+           display:flex; flex-direction:column; gap:12px; pointer-events:none; }
+  #turnLeft { transform:translateX(-40px); }
+  .turn { width:68px; height:68px; border:1px solid #3a404c; border-radius:50%;
+          background:#292e38; color:var(--text); font-size:11px; font-weight:700;
+          line-height:1.15; touch-action:none; pointer-events:auto; }
+  .turn:active, .turn.active { background:var(--accent); color:#15171c; }
+  .joy { width:76px; height:min(58dvh,260px); border-radius:38px;
+         background:var(--fill); border:1px solid #3a404c; position:relative;
+         touch-action:none; }
+  .joy::before { content:""; position:absolute; left:50%; top:10%; bottom:10%;
+                 width:4px; transform:translateX(-50%); border-radius:2px;
+                 background:#414754; }
+  .knob { position:absolute; left:50%; top:50%; width:62px; height:62px;
+          transform:translate(-50%,-50%); border-radius:50%; background:var(--accent);
+          box-shadow:0 4px 18px rgba(255,122,26,.45); }
+  .knob.drag { transition:none; }
+  .vals { color:var(--muted); font-size:15px; }
+  .vals b { color:var(--text); }
+  .row { display:flex; align-items:center; gap:12px; padding:13px 16px; }
+  .row .val { margin-left:auto; color:var(--muted); min-width:70px; text-align:right; }
+  input[type=range] { appearance:none; flex:1; height:4px; border-radius:2px;
+    background:linear-gradient(90deg,var(--accent) var(--p,50%),var(--fill) var(--p,50%)); }
+  input[type=range]::-webkit-slider-thumb { appearance:none; width:28px; height:28px;
+    border-radius:50%; background:#fff; box-shadow:0 2px 6px #0008; }
+  input[type=range]::-moz-range-thumb { width:26px; height:26px; border:0;
+    border-radius:50%; background:#fff; }
+  .stop { border:0; border-radius:14px; background:#ff4d5e24; color:var(--stop);
+          font-weight:700; font-size:16px; padding:13px; }
+  .nav-toggle { border:1px solid #3a404c; border-radius:14px; background:var(--fill);
+                color:var(--text); font-weight:700; font-size:16px; padding:13px; }
+  .nav-toggle.off { background:#263c2d; color:#8ee0a4; }
+  .status { min-height:22px; color:var(--muted); text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>TIAGo</h1>
+  <section class="card pad">
+    <div class="jwrap">
+      <span class="jl f">FORWARD</span><span class="jl b">BACKWARD</span>
+      <div class="turns">
+        <button class="turn" id="turnLeft">TURN<br>LEFT</button>
+        <button class="turn" id="turnRight">TURN<br>RIGHT</button>
+      </div>
+      <div class="joy" id="joy"><div class="knob" id="knob"></div></div>
+    </div>
+    <div class="vals">Speed <b id="lin">0.00</b> m/s · Rotation <b id="ang">0.00</b> rad/s</div>
+  </section>
+  <button class="nav-toggle" id="navToggle">NAVIGATION: ON</button>
+  <button class="stop" id="stop">STOP</button>
+  <div class="status" id="status">Connecting…</div>
+</main>
+<script>
+const $=id=>document.getElementById(id), joy=$('joy'), knob=$('knob'), MAX_SPEED=0.25;
+let drag=false, timer=0, turnTimer=0;
+let navigationEnabled=true;
+let cmd={linear:0,lateral:0,angular:0};
+async function send(){try{await fetch('/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(cmd)});$('status').textContent=cmd.linear||cmd.lateral||cmd.angular?'Moving':'Stopped';
+}catch(e){$('status').textContent='Server unavailable';}}
+function move(e){const r=joy.getBoundingClientRect(),R=(r.height-knob.offsetHeight)/2;
+  if(!navigationEnabled)return;
+  let dy=e.clientY-r.top-r.height/2;
+  dy=Math.max(-R,Math.min(R,dy));
+  knob.style.transform=`translate(-50%,calc(-50% + ${dy}px))`;
+  cmd.linear=(-dy/R)*MAX_SPEED;
+  $('lin').textContent=cmd.linear.toFixed(2);send();}
+function stopSlider(){drag=false;knob.classList.remove('drag');knob.style.transform='translate(-50%,-50%)';
+  clearInterval(timer);timer=0;cmd.linear=0;$('lin').textContent='0.00';send();}
+function stopTurn(button){button.classList.remove('active');
+  clearInterval(turnTimer);turnTimer=0;cmd.angular=0;$('ang').textContent='0.00';send();}
+async function setNavigation(enabled){
+  try {
+    const response=await fetch('/mode',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled})});
+    if(!response.ok) throw new Error('mode request failed');
+    navigationEnabled=enabled;
+    $('navToggle').textContent=`NAVIGATION: ${enabled?'ON':'OFF'}`;
+    $('navToggle').classList.toggle('off',!enabled);
+    $('status').textContent=enabled?'Manual navigation enabled':'Following person';
+  } catch(e) {$('status').textContent='Server unavailable';}
+}
+joy.onpointerdown=e=>{e.preventDefault();drag=true;knob.classList.add('drag');joy.setPointerCapture(e.pointerId);
+  move(e);clearInterval(timer);timer=setInterval(send,150);};
+joy.onpointermove=e=>{if(drag)move(e);};
+['pointerup','pointercancel','lostpointercapture'].forEach(x=>joy.addEventListener(x,stopSlider));
+for(const [id,direction] of [['turnLeft',-1],['turnRight',1]]){
+  const button=$(id);
+  button.onpointerdown=e=>{e.preventDefault();button.setPointerCapture(e.pointerId);
+    if(!navigationEnabled)return;
+    button.classList.add('active');cmd.angular=direction*0.5;
+    $('ang').textContent=cmd.angular.toFixed(2);send();clearInterval(turnTimer);turnTimer=setInterval(send,150);};
+  ['pointerup','pointercancel','lostpointercapture'].forEach(x=>button.addEventListener(x,()=>stopTurn(button)));
+}
+$('stop').onpointerdown=e=>{e.preventDefault();stopSlider();stopTurn($('turnLeft'));stopTurn($('turnRight'));};
+$('navToggle').onpointerdown=e=>{e.preventDefault();
+  const enabled=!navigationEnabled;
+  if(!enabled){stopSlider();stopTurn($('turnLeft'));stopTurn($('turnRight'));}
+  setNavigation(enabled);
+};
+window.addEventListener('blur',()=>{stopSlider();stopTurn($('turnLeft'));stopTurn($('turnRight'));});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){stopSlider();stopTurn($('turnLeft'));stopTurn($('turnRight'));}});
+</script>
+</body>
+</html>

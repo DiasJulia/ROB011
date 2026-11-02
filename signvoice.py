@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-signvoice — ASL (250 isolated signs) -> text -> speech, running locally.
+signvoice â€” ASL (250 isolated signs) -> text -> speech, running locally.
 
 Pipeline (same contract as signchat, github.com/nlevites/signchat, MIT):
   webcam (OpenCV)
@@ -18,6 +18,7 @@ Usage:  python signvoice.py          (downloads the models on first run)
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import platform
@@ -302,7 +303,7 @@ class LLMClient:
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=json.dumps(payload).encode(), method="POST",
             headers={"Content-Type": "application/json",
-                     **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {})})
+                     **({"Authorization": "Bearer " + self.api_key} if self.api_key else {})})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = json.loads(r.read())
@@ -422,6 +423,13 @@ class TurnWorker(threading.Thread):
         """sentence: an already composed sentence (e.g. from the preview), to avoid calling the LLM again."""
         self.q.put((list(tokens), sentence))
 
+    def repeat_last(self) -> bool:
+        """Speak the last completed sentence again without recomposing it."""
+        if not self.last_sentence:
+            return False
+        self.q.put(([], self.last_sentence))
+        return True
+
     def compose(self, tokens: list[SignToken]) -> str:
         sentence = ""
         if self.use_llm and self.llm:
@@ -475,6 +483,7 @@ class PreviewWorker(threading.Thread):
         with self.lock:
             return self.sentence if self.done == tuple(t.label for t in tokens) else ""
 
+
     def run(self):
         while True:
             self.event.wait()
@@ -485,6 +494,431 @@ class PreviewWorker(threading.Thread):
             with self.lock:
                 if key == self.want:          # discard if the signs changed meanwhile
                     self.done, self.sentence = key, sentence
+
+
+class RosCamera:
+    """Reads the latest camera frame from a ROS image topic without blocking."""
+
+    PREFERRED_TOPICS = (
+        "/head_front_camera/image_raw",
+        "/xtion/rgb/image_raw",
+        "/camera/color/image_raw",
+        "/camera/image_raw",
+    )
+
+    def __init__(self, topic: str = ""):
+        try:
+            import rospy
+            from cv_bridge import CvBridge
+            from sensor_msgs.msg import CompressedImage, Image
+        except ImportError as e:
+            raise SystemExit(
+                "ROS camera requires rospy, cv_bridge and sensor_msgs in the ROS environment."
+            ) from e
+
+        self.rospy = rospy
+        self.bridge = CvBridge()
+        self.frame: np.ndarray | None = None
+        self.lock = threading.Lock()
+        self.topic, msg_type = self._select_topic(topic, Image, CompressedImage)
+        self.subscriber = rospy.Subscriber(
+            self.topic, msg_type, self._on_image, queue_size=1, buff_size=2**24)
+        print(f"[camera] ROS topic: {self.topic}", flush=True)
+
+    def _select_topic(self, requested: str, image_type, compressed_type):
+        topics = dict(self.rospy.get_published_topics())
+        expected = {
+            "sensor_msgs/Image": image_type,
+            "sensor_msgs/CompressedImage": compressed_type,
+        }
+        if requested:
+            actual_type = topics.get(requested)
+            if actual_type not in expected:
+                available = ", ".join(
+                    name for name, kind in topics.items() if kind in expected)
+                raise SystemExit(
+                    f"ROS camera topic {requested!r} is not a published image topic. "
+                    f"Available image topics: {available or 'none'}"
+                )
+            return requested, expected[actual_type]
+
+        for candidate in self.PREFERRED_TOPICS:
+            if topics.get(candidate) in expected:
+                return candidate, expected[topics[candidate]]
+        for name, kind in topics.items():
+            if kind in expected:
+                return name, expected[kind]
+        raise SystemExit(
+            "No published ROS image topic found. Run `rostopic list` and pass "
+            "`--ros-camera-topic TOPIC`."
+        )
+
+    def _on_image(self, message) -> None:
+        try:
+            if message._type == "sensor_msgs/CompressedImage":
+                frame = self.bridge.compressed_imgmsg_to_cv2(message, desired_encoding="bgr8")
+            else:
+                frame = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+            with self.lock:
+                self.frame = np.asarray(frame).copy()
+        except Exception as e:  # noqa: BLE001
+            self.rospy.logwarn_throttle(5.0, "signvoice: ROS camera conversion failed: %s", e)
+
+    def read(self):
+        with self.lock:
+            frame = None if self.frame is None else self.frame.copy()
+        return frame is not None, frame
+
+    def release(self) -> None:
+        self.subscriber.unregister()
+
+
+class RosbridgeCamera:
+    """Reads a compressed ROS image through rosbridge, without local ROS packages."""
+
+    def __init__(self, url: str, topic: str):
+        try:
+            import websocket
+        except ImportError as e:
+            raise SystemExit(
+                "ROS bridge camera requires websocket-client. Install it with "
+                "`pip install websocket-client`."
+            ) from e
+        import cv2
+
+        self.websocket = websocket
+        self.cv2 = cv2
+        self.topic = topic
+        self.frame: np.ndarray | None = None
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.error: Exception | None = None
+        try:
+            self.socket = websocket.create_connection(url, timeout=10)
+            self.socket.send(json.dumps({
+                "op": "subscribe",
+                "topic": topic,
+                "type": "sensor_msgs/CompressedImage",
+                "queue_length": 1,
+                "throttle_rate": 0,
+            }))
+        except Exception as e:
+            raise SystemExit(
+                f"Could not connect to rosbridge at {url}: {e}. "
+                "Start rosbridge_server on the robot and check the network."
+            ) from e
+        self.thread = threading.Thread(target=self._receive, daemon=True)
+        self.thread.start()
+        print(f"[camera] rosbridge: {url} -> {topic}", flush=True)
+
+    def _receive(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                message = json.loads(self.socket.recv())
+                if message.get("op") != "publish":
+                    continue
+                encoded = message["msg"]["data"]
+                raw = base64.b64decode(encoded)
+                frame = self.cv2.imdecode(np.frombuffer(raw, dtype=np.uint8),
+                                          self.cv2.IMREAD_COLOR)
+                if frame is not None:
+                    with self.lock:
+                        self.frame = frame
+            except Exception as e:  # noqa: BLE001
+                if not self.stop_event.is_set():
+                    self.error = e
+                break
+
+    def read(self):
+        if self.error is not None:
+            raise RuntimeError(f"rosbridge camera stopped: {self.error}") from self.error
+        with self.lock:
+            frame = None if self.frame is None else self.frame.copy()
+        return frame is not None, frame
+
+    def release(self) -> None:
+        self.stop_event.set()
+        try:
+            self.socket.send(json.dumps({"op": "unsubscribe", "topic": self.topic}))
+            self.socket.close()
+        except Exception:
+            pass
+
+
+class RosbridgePublisher:
+    """Publishes JSON conversation history through rosbridge."""
+
+    def __init__(self, url: str, topic: str):
+        import websocket
+
+        self.socket = websocket.create_connection(url, timeout=10)
+        self.topic = topic
+        self.socket.send(json.dumps({
+            "op": "advertise",
+            "topic": topic,
+            "type": "std_msgs/String",
+        }))
+
+    def publish(self, history: list[tuple[str, str]]) -> None:
+        self.socket.send(json.dumps({
+            "op": "publish",
+            "topic": self.topic,
+            "msg": {"data": json.dumps(history)},
+        }))
+
+    def release(self) -> None:
+        try:
+            self.socket.send(json.dumps({"op": "unadvertise", "topic": self.topic}))
+            self.socket.close()
+        except Exception:
+            pass
+
+
+class RosbridgeJointState:
+    """Keeps the latest head joint positions from a rosbridge subscription."""
+
+    def __init__(self, url: str, topic: str = "/joint_states"):
+        import websocket
+
+        self.socket = websocket.create_connection(url, timeout=10)
+        self.positions: dict[str, float] = {}
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.error: Exception | None = None
+        self.topic = topic
+        self.socket.send(json.dumps({
+            "op": "subscribe",
+            "topic": topic,
+            "type": "sensor_msgs/JointState",
+            "queue_length": 1,
+            "throttle_rate": 100,
+        }))
+        self.thread = threading.Thread(target=self._receive, daemon=True)
+        self.thread.start()
+
+    def _receive(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                message = json.loads(self.socket.recv())
+                if message.get("op") != "publish":
+                    continue
+                data = message["msg"]
+                positions = dict(zip(data.get("name", []), data.get("position", [])))
+                with self.lock:
+                    self.positions.update(
+                        {name: float(value) for name, value in positions.items()})
+            except Exception as e:  # noqa: BLE001
+                if not self.stop_event.is_set():
+                    self.error = e
+                break
+
+    def get(self, name: str) -> float | None:
+        with self.lock:
+            return self.positions.get(name)
+
+    def release(self) -> None:
+        self.stop_event.set()
+        try:
+            self.socket.send(json.dumps({"op": "unsubscribe", "topic": self.topic}))
+            self.socket.close()
+        except Exception:
+            pass
+
+
+class BaseFaceTracker:
+    """Publishes a small angular correction to center the face with the base."""
+
+    def __init__(self, url: str, command_topic: str = "/face_tracking_vel",
+                 gain: float = 0.35, max_angular: float = 0.12,
+                 deadzone: float = 0.12):
+        import websocket
+
+        self.socket = websocket.create_connection(url, timeout=10)
+        self.topic = command_topic
+        self.gain = gain
+        self.max_angular = max_angular
+        self.deadzone = deadzone
+        self.last_publish = 0.0
+        self.socket.send(json.dumps({
+            "op": "advertise",
+            "topic": command_topic,
+            "type": "geometry_msgs/Twist",
+        }))
+
+    def update(self, face) -> None:
+        now = time.monotonic()
+        if now - self.last_publish < 0.20:
+            return
+        if face is None:
+            angular = 0.0
+        else:
+            face_x = sum(float(point.x) for point in face) / len(face)
+            error_x = face_x - 0.5
+            angular = 0.0 if abs(error_x) < self.deadzone else max(
+                -self.max_angular, min(self.max_angular, -error_x * self.gain))
+        self.socket.send(json.dumps({
+            "op": "publish",
+            "topic": self.topic,
+            "msg": {
+                "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "angular": {"x": 0.0, "y": 0.0, "z": angular},
+            },
+        }))
+        self.last_publish = now
+
+    def release(self) -> None:
+        try:
+            self.socket.send(json.dumps({
+                "op": "publish",
+                "topic": self.topic,
+                "msg": {
+                    "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+                },
+            }))
+            self.socket.send(json.dumps({"op": "unadvertise", "topic": self.topic}))
+            self.socket.close()
+        except Exception:
+            pass
+
+
+class FaceHeadTracker:
+    """Publishes filtered, bounded head and torso corrections from face position."""
+
+    def __init__(self, url: str, command_topic: str, joint_state: RosbridgeJointState,
+                 torso_command_topic: str | None = None,
+                 pitch_gain: float = 0.06,
+                 torso_gain: float = 0.08, max_step: float = 0.012,
+                 torso_max_step: float = 0.008, deadzone: float = 0.18,
+                 torso_deadzone: float = 0.12,
+                 target_y: float = 0.38,
+                 yaw_limits: tuple[float, float] = (-1.4, 1.4),
+                 pitch_limits: tuple[float, float] = (-0.5, 0.5),
+                 torso_limits: tuple[float, float] = (0.0, 0.35)):
+        import websocket
+
+        self.socket = websocket.create_connection(url, timeout=10)
+        self.torso_socket = (
+            websocket.create_connection(url, timeout=10)
+            if torso_command_topic else None
+        )
+        self.topic = command_topic
+        self.torso_topic = torso_command_topic
+        self.joint_state = joint_state
+        self.pitch_gain = pitch_gain
+        self.torso_gain = torso_gain
+        self.max_step = max_step
+        self.torso_max_step = torso_max_step
+        self.deadzone = deadzone
+        self.torso_deadzone = torso_deadzone
+        self.target_y = target_y
+        self.yaw_limits = yaw_limits
+        self.pitch_limits = pitch_limits
+        self.torso_limits = torso_limits
+        self.last_publish = 0.0
+        self.filtered_error: tuple[float, float] | None = None
+        self.socket.send(json.dumps({
+            "op": "advertise",
+            "topic": command_topic,
+            "type": "trajectory_msgs/JointTrajectory",
+        }))
+        if self.torso_socket is not None:
+            self.torso_socket.send(json.dumps({
+                "op": "advertise",
+                "topic": torso_command_topic,
+                "type": "trajectory_msgs/JointTrajectory",
+            }))
+
+    @staticmethod
+    def _bounded(value: float, limit: float) -> float:
+        return max(-limit, min(limit, value))
+
+    def update(self, face) -> None:
+        if face is None or time.monotonic() - self.last_publish < 0.20:
+            return
+        yaw = self.joint_state.get("head_1_joint")
+        pitch = self.joint_state.get("head_2_joint")
+        if yaw is None or pitch is None:
+            return
+
+        ys = [float(point.y) for point in face]
+        error_y = sum(ys) / len(ys) - self.target_y
+        if self.filtered_error is None:
+            self.filtered_error = (0.0, error_y)
+        else:
+            alpha = 0.10
+            self.filtered_error = tuple(
+                (1.0 - alpha) * old + alpha * new
+                for old, new in zip(self.filtered_error, (0.0, error_y))
+            )
+        _, filtered_error_y = self.filtered_error
+        head_error_y = filtered_error_y if abs(filtered_error_y) >= self.deadzone else 0.0
+        torso_error_y = (
+            filtered_error_y if abs(filtered_error_y) >= self.torso_deadzone else 0.0
+        )
+
+        # Keep the head yaw exactly where it is: tracking is vertical only.
+        target_yaw = yaw
+        target_pitch = self._bounded(
+            pitch - self._bounded(head_error_y * self.pitch_gain, self.max_step),
+            max(abs(self.pitch_limits[0]), abs(self.pitch_limits[1])))
+        target_pitch = max(self.pitch_limits[0], min(self.pitch_limits[1], target_pitch))
+        message = {
+            "op": "publish",
+            "topic": self.topic,
+            "msg": {
+                "joint_names": ["head_1_joint", "head_2_joint"],
+                "points": [{
+                    "positions": [target_yaw, target_pitch],
+                    "velocities": [0.0, 0.0],
+                    "time_from_start": {"secs": 0, "nsecs": 300000000},
+                }],
+            },
+        }
+        self.socket.send(json.dumps(message))
+        if self.torso_socket is not None:
+            torso = self.joint_state.get("torso_lift_joint")
+            if torso is not None:
+                # The torso handles only the large vertical error; the head
+                # remains responsible for fine corrections.
+                torso_error = 0.0
+                if torso_error_y:
+                    # Image Y grows downwards: when the face is low in the
+                    # image, lower the camera/base so the face comes up.
+                    torso_error = self._bounded(-torso_error_y * self.torso_gain,
+                                                self.torso_max_step)
+                target_torso = max(
+                    self.torso_limits[0],
+                    min(self.torso_limits[1], torso + torso_error),
+                )
+                torso_message = {
+                    "op": "publish",
+                    "topic": self.torso_topic,
+                    "msg": {
+                        "joint_names": ["torso_lift_joint"],
+                        "points": [{
+                            "positions": [target_torso],
+                            "velocities": [0.0],
+                            "time_from_start": {"secs": 0, "nsecs": 500000000},
+                        }],
+                    },
+                }
+                self.torso_socket.send(json.dumps(torso_message))
+        self.last_publish = time.monotonic()
+
+    def release(self) -> None:
+        try:
+            self.socket.send(json.dumps({"op": "unadvertise", "topic": self.topic}))
+            self.socket.close()
+        except Exception:
+            pass
+        if self.torso_socket is not None:
+            try:
+                self.torso_socket.send(json.dumps({
+                    "op": "unadvertise", "topic": self.torso_topic}))
+                self.torso_socket.close()
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -601,7 +1035,7 @@ POINT_BOX = (0.15, 0.08, 0.85, 0.78)
 @dataclass
 class Target:
     """Clickable/pointable area: a command button or the x of a buffered sign."""
-    action: str                              # mode | speak | undo | clear | llm | fullscreen | quit | del
+    action: str                              # mode | speak | undo | clear | llm | fullscreen | pause | quit | del
     rect: tuple[int, int, int, int]          # hit area (x1, y1, x2, y2) on screen
     label: str = ""
     arg: int = -1                            # sign index (action "del")
@@ -692,7 +1126,7 @@ def letterbox(cv2, frame: np.ndarray, out_w: int, out_h: int):
 
 
 def _fit_text(cv2, text: str, max_w: int, scale: float, thick: int) -> str:
-    """Truncates the text (with …) to fit in max_w pixels."""
+    """Truncates the text (with â€¦) to fit in max_w pixels."""
     font = cv2.FONT_HERSHEY_SIMPLEX
     if cv2.getTextSize(text, font, scale, thick)[0][0] <= max_w:
         return text
@@ -702,39 +1136,41 @@ def _fit_text(cv2, text: str, max_w: int, scale: float, thick: int) -> str:
 
 
 def sidebar_x(W: int, H: int) -> int:
-    """Left edge of the history sidebar (takes the full height on the right)."""
+    """Left edge of the history sidebar on the right."""
     return W - max(int(180 * ui_scale(W, H)), int(W * 0.25))
 
 
-def layout_targets(cv2, W: int, H: int, tokens: list[SignToken], llm_on: bool,
-                   fullscreen: bool, listening: bool = False) -> list[Target]:
-    """Positions of the buttons (bottom bar) and of the sign chips (panel above it, left of
-    the sidebar). In listen mode only the relevant buttons remain and there are no chips."""
+def layout_targets(cv2, W: int, H: int, tokens: list[SignToken],
+                   listening: bool = False,
+                   paused: bool = False) -> list[Target]:
+    """Positions of the top buttons and the sign chips below them.
+
+    In listen mode only the relevant buttons remain and there are no chips.
+    """
     s = ui_scale(W, H)
     px = lambda v: max(1, int(v * s))               # noqa: E731
     font = cv2.FONT_HERSHEY_SIMPLEX
     targets = []
     area_w = sidebar_x(W, H)
 
-    screen = ("fullscreen", "Window" if fullscreen else "Fullscreen")
+    pause = ("pause", "Resume" if paused else "Pause")
     if listening:
-        buttons = [("mode", "Mode: listen"), ("clear", "Clear"), screen, ("quit", "Quit")]
+        buttons = [("mode", "Mode: listen"), ("clear", "Clear"), pause, ("quit", "Quit")]
         tokens = []
     else:
         buttons = [("mode", "Mode: talk"), ("speak", "Speak"), ("undo", "Undo"),
-                   ("clear", "Clear"), ("llm", f"LLM {'on' if llm_on else 'off'}"),
-                   screen, ("quit", "Quit")]
-    # buttons in a full-width bottom bar (below the text and the history)
+                   ("clear", "Clear"), pause, ("quit", "Quit")]
+    # Buttons in a full-width top bar.
     margin, bh, gap = px(10), px(40), px(8)
     cols = len(buttons)
     if (W - 2 * margin - (cols - 1) * gap) // cols < px(75):        # narrow: 2 rows
         cols = (cols + 1) // 2
     rows = (len(buttons) + cols - 1) // cols
-    bar_top = H - (2 * margin + rows * bh + (rows - 1) * gap)
+    bar_bottom = 2 * margin + rows * bh + (rows - 1) * gap
     bw = (W - 2 * margin - (cols - 1) * gap) // cols
     for i, (action, label) in enumerate(buttons):
         x = margin + (i % cols) * (bw + gap)
-        y = bar_top + margin + (i // cols) * (bh + gap)
+        y = margin + (i // cols) * (bh + gap)
         targets.append(Target(action, (x, y, x + bw, y + bh), label))
 
     # chips: show the latest ones that fit; the x sits on each one's top-right corner
@@ -747,7 +1183,7 @@ def layout_targets(cv2, W: int, H: int, tokens: list[SignToken], llm_on: bool,
         first -= 1
         used += widths[first] + gap
     x = px(12) + (px(40) if first > 0 else 0)
-    y1 = bar_top - px(106)
+    y1 = bar_bottom + px(20)
     hr = int(r * 1.8)                               # hit area larger than the drawn x
     for i in range(first, len(tokens)):
         x2 = x + widths[i]
@@ -812,14 +1248,15 @@ def draw_ui(cv2, canvas, video_rect, hands, mirror, targets, worker, sentence,
     for hobs in hands:
         for p in hobs.landmarks:
             x = (1 - p.x) if mirror else p.x
-            cv2.circle(canvas, (x0 + int(x * vw), y0 + int(p.y * vh)), px(3), (0, 255, 180), -1)
+            cv2.circle(canvas, (x0 + int(x * vw), y0 + int(p.y * vh)),
+                       px(3), (0, 255, 180), -1)
 
     side_x = sidebar_x(W, H)
     left, max_w = px(12), side_x - px(24)
-    # top of the bottom button bar; the text panel and the history sit above it
-    bar_top = min((t.rect[1] for t in buttons), default=H + px(10)) - px(10)
+    # Bottom of the top button bar; the history starts immediately below it.
+    bar_bottom = max((t.rect[3] for t in buttons), default=0) + px(10)
 
-    # bottom panel texts: (text, y above the bar top, size, thickness, color)
+    # Bottom panel texts: (text, distance above the bottom, size, thickness, color)
     if listener is not None:
         # listen mode: the last heard utterance, wrapped (earlier ones are in the history)
         heard = listener.lines[-1] if listener.lines else ""
@@ -839,9 +1276,9 @@ def draw_ui(cv2, canvas, video_rect, hands, mirror, targets, worker, sentence,
 
     # semi-transparent panels and buttons
     overlay = canvas.copy()
-    cv2.rectangle(overlay, (0, bar_top - panel_h), (side_x, bar_top), (20, 20, 20), -1)
-    cv2.rectangle(overlay, (side_x, 0), (W, bar_top), (20, 20, 20), -1)
-    cv2.rectangle(overlay, (0, bar_top), (W, H), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (0, H - panel_h), (side_x, H), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (side_x, bar_bottom), (W, H), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (0, 0), (W, bar_bottom), (20, 20, 20), -1)
     for t in buttons:
         color = (90, 70, 20) if t.key == hover else (40, 40, 40)
         cv2.rectangle(overlay, t.rect[:2], t.rect[2:], color, -1)
@@ -864,11 +1301,11 @@ def draw_ui(cv2, canvas, video_rect, hands, mirror, targets, worker, sentence,
         cv2.putText(canvas, t.label, ((x1 + x2 - tw) // 2, (y1 + y2 + tht) // 2), font, sc,
                     (255, 255, 255), th, cv2.LINE_AA)
 
-    draw_history(cv2, canvas, list(worker.history), (side_x, 0, W, bar_top), s)
+    draw_history(cv2, canvas, list(worker.history), (side_x, bar_bottom, W, H), s)
 
     # sign chips, each with an x on top
     if chips and chips[0].arg > 0:
-        cv2.putText(canvas, "...", (left, bar_top - px(82)), font, 0.65 * s,
+        cv2.putText(canvas, "...", (left, bar_bottom + px(58)), font, 0.65 * s,
                     (0, 255, 180), px(2), cv2.LINE_AA)
     r = px(11)
     for t in chips:
@@ -886,7 +1323,7 @@ def draw_ui(cv2, canvas, video_rect, hands, mirror, targets, worker, sentence,
 
     for text, from_bottom, size, thick, color in rows:
         sc, th = size * s, px(thick)
-        cv2.putText(canvas, _fit_text(cv2, text, max_w, sc, th), (left, bar_top - px(from_bottom)),
+        cv2.putText(canvas, _fit_text(cv2, text, max_w, sc, th), (left, H - px(from_bottom)),
                     font, sc, color, th, cv2.LINE_AA)
 
     # gesture cursor, with a progress ring while holding over a target
@@ -903,6 +1340,34 @@ def draw_ui(cv2, canvas, video_rect, hands, mirror, targets, worker, sentence,
 def main() -> None:
     ap = argparse.ArgumentParser(description="ASL -> speech in real time (PopSign 250 vocabulary)")
     ap.add_argument("--camera", type=int, default=0, help="webcam index")
+    ap.add_argument("--ros-camera", action="store_true",
+                    help="read the robot camera from ROS instead of a local webcam")
+    ap.add_argument("--ros-camera-topic", default=None,
+                    help="ROS image topic; omitted with --ros-camera means automatic discovery")
+    ap.add_argument("--rosbridge-url", default="ws://10.68.0.1:9090",
+                    help="rosbridge WebSocket URL for the robot camera")
+    ap.add_argument("--nav-server", action="store_true",
+                    help="start the minimal phone navigation server on this PC")
+    ap.add_argument("--nav-port", type=int, default=8080,
+                    help="local port for the phone navigation server")
+    ap.add_argument("--nav-command-topic", default="/phone_vel",
+                    help="ROS Twist topic used by the phone navigation server")
+    ap.add_argument("--ros-history-topic", default="/conversation/history",
+                    help="ROS topic where conversation history is published")
+    ap.add_argument("--track-face", action="store_true",
+                    help="opt in to bounded TIAGo head tracking via rosbridge")
+    ap.add_argument("--track-person", action="store_true",
+                    help="track the person with the head and the vertical torso lift")
+    ap.add_argument("--track-deadzone", type=float, default=0.18,
+                    help="vertical face error ignored by tracking (normalized image units)")
+    ap.add_argument("--head-command-topic", default="/head_controller/command",
+                    help="JointTrajectory topic used for face tracking")
+    ap.add_argument("--torso-command-topic", default="/torso_controller/command",
+                    help="JointTrajectory topic used for vertical person tracking")
+    ap.add_argument("--base-command-topic", default="/face_tracking_vel",
+                    help="lower-priority Twist topic used for face centering")
+    ap.add_argument("--track-base", action="store_true",
+                    help="use a small base rotation to center the person horizontally")
     ap.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     ap.add_argument("--window", type=int, default=48, help="frames per window (max 48)")
     ap.add_argument("--min-frames", type=int, default=8, help="minimum frames before inferring")
@@ -939,6 +1404,21 @@ def main() -> None:
     ap.add_argument("--stt-lang", default="en",
                     help="spoken language in listen mode (en, pt, fr...; empty = auto-detect)")
     args = ap.parse_args()
+    nav_process = None
+    if args.nav_server:
+        nav_script = HERE / "nav" / "server.py"
+        nav_priority = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+        nav_process = subprocess.Popen([
+            sys.executable, str(nav_script),
+            "--rosbridge-url", args.rosbridge_url,
+            "--port", str(args.nav_port),
+            "--topic", args.nav_command_topic,
+        ], creationflags=nav_priority)
+        print(f"[nav] started; open http://<PC-IP>:{args.nav_port} on the phone",
+              flush=True)
+        if nav_priority:
+            print("[nav] running below the camera/sign-processing priority",
+                  flush=True)
 
     global VOICE_LANG, VOICE_NAME
     VOICE_LANG, VOICE_NAME = args.voice_lang, args.voice
@@ -971,11 +1451,44 @@ def main() -> None:
     else:
         print("[llm] off (LLM_API_KEY not found in this terminal)", flush=True)
 
-    cap = cv2.VideoCapture(args.camera)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    if not cap.isOpened():
-        raise SystemExit(f"Could not open webcam {args.camera}. Try --camera 1.")
+    use_ros_camera = args.ros_camera or args.ros_camera_topic is not None
+    use_rosbridge = args.rosbridge_url is not None and use_ros_camera
+    history_pub = None
+    head_state = None
+    head_tracker = None
+    base_tracker = None
+    if use_ros_camera and use_rosbridge:
+        ros_topic = args.ros_camera_topic or "/xtion/rgb/image_raw/compressed"
+        cap = RosbridgeCamera(args.rosbridge_url, ros_topic)
+        history_pub = RosbridgePublisher(args.rosbridge_url, args.ros_history_topic)
+        if args.track_face or args.track_person:
+            head_state = RosbridgeJointState(args.rosbridge_url)
+            head_tracker = FaceHeadTracker(
+                args.rosbridge_url, args.head_command_topic, head_state,
+                torso_command_topic=args.torso_command_topic if args.track_person else None,
+                deadzone=args.track_deadzone)
+            mode = "head + torso" if args.track_person else "head"
+            print(f"[tracking] {mode} tracking enabled; filtered bounded corrections active",
+                  flush=True)
+        if args.track_base:
+            base_tracker = BaseFaceTracker(args.rosbridge_url, args.base_command_topic)
+            print("[tracking] base horizontal centering enabled on the lower-priority "
+                  f"{args.base_command_topic} topic; manual navigation has priority",
+                  flush=True)
+    elif use_ros_camera:
+        if args.track_face or args.track_person or args.track_base:
+            raise SystemExit("--track-face/--track-person/--track-base require "
+                             "--ros-camera with rosbridge on the PC.")
+        import rospy
+
+        rospy.init_node("signvoice", anonymous=True, disable_signals=True)
+        cap = RosCamera(args.ros_camera_topic or "")
+    else:
+        cap = cv2.VideoCapture(args.camera)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        if not cap.isOpened():
+            raise SystemExit(f"Could not open webcam {args.camera}. Try --camera 1.")
 
     win = "signvoice"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
@@ -998,23 +1511,34 @@ def main() -> None:
     canvas_size = (960, 720)
     pointer = DwellPointer(args.dwell, args.quit_dwell)
     cursor: tuple[int, int] | None = None
+    paused = False
     last_hand_t = time.monotonic()
     last_infer = 0.0
     last_ts = 0
+    published_history = ""
 
     def run_action(t: Target) -> bool:
         """Runs a command (gesture, mouse or keyboard). Returns False to quit."""
-        nonlocal tokens, fullscreen, listening
+        nonlocal tokens, fullscreen, listening, paused, top
         if t.action == "quit":
             return False
         if t.action == "mode":
             listening = not listening
             listener.set_active(listening)
+        elif t.action == "pause":
+            paused = not paused
+            ring.clear()
+            admitter.boundary()
+            top = []
+            print("[signs] paused" if paused else "[signs] resumed", flush=True)
         elif t.action == "clear" and listening:
             listener.lines.clear()
-        elif t.action == "speak" and tokens:
-            worker.submit(tokens, preview.ready(tokens))
-            tokens = []
+        elif t.action == "speak":
+            if tokens:
+                worker.submit(tokens, preview.ready(tokens))
+                tokens = []
+            else:
+                worker.repeat_last()
         elif t.action == "undo" and tokens:
             tokens.pop()
         elif t.action == "clear":
@@ -1024,29 +1548,33 @@ def main() -> None:
         elif t.action == "fullscreen":
             fullscreen = not fullscreen
             set_fullscreen(fullscreen)
-        elif t.action == "llm":
-            if llm and llm.available:
-                worker.use_llm = not worker.use_llm
-                admitter.use_band = worker.use_llm and not args.no_band
-            else:
-                print("[llm] set LLM_API_KEY (or a local LLM_BASE_URL) to enable it.")
         return True
 
-    keymap = {ord(" "): "speak", 8: "undo", ord("c"): "clear", ord("l"): "llm",
+    keymap = {ord(" "): "speak", 8: "undo", ord("c"): "clear",
               ord("f"): "fullscreen", ord("q"): "quit", ord("m"): "mode"}
     print("Ready. Sign; lower your hands to speak the sentence. "
           "Point your index finger at the buttons for commands.", flush=True)
 
     while True:
         ok, frame = cap.read()
+        if not ok and use_rosbridge:
+            time.sleep(0.01)
+            continue
+        if not ok and use_ros_camera and not cap.rospy.is_shutdown():
+            time.sleep(0.01)
+            continue
         if not ok:
-            print("Webcam frame failed.")
+            print("ROS camera frame failed." if use_ros_camera else "Webcam frame failed.")
             break
         now = time.monotonic()
         ts = max(last_ts + 1, int(now * 1000))   # MediaPipe requires increasing timestamps
         last_ts = ts
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)   # not mirrored: same as signchat
         face, hands, pose = det.process(rgb, ts)
+        if head_tracker is not None:
+            head_tracker.update(face)
+        if base_tracker is not None:
+            base_tracker.update(face)
         mirror = not args.no_mirror
 
         # gesture cursor: pointing index finger (smoothed)
@@ -1063,7 +1591,7 @@ def main() -> None:
         if hands:
             last_hand_t = now
             # a hand pointing at a button/x is not a sign; there are no signs in listen mode
-            if hover is None and not listening:
+            if hover is None and not listening and not paused:
                 ring.append(assemble_frame(face, hands, pose, args.swap_hands))
                 if len(ring) >= args.min_frames and now - last_infer >= args.infer_every:
                     last_infer = now
@@ -1082,21 +1610,28 @@ def main() -> None:
                 ring.clear()
                 admitter.boundary()
                 top = []
-            if gap > args.silence and tokens and not listening:
+            if gap > args.silence and tokens and not listening and not paused:
                 worker.submit(tokens, preview.ready(tokens))
                 tokens = []
 
         preview.request(tokens)             # no-op if the signs did not change
         # while there are signs, show the preview; after speaking, the last spoken sentence
         sentence = preview.text(tokens) if tokens else worker.last_sentence
-        display = cv2.flip(frame, 1) if mirror else frame
+        display = frame
+        display = cv2.flip(display, 1) if mirror else display
         win_w, win_h = window_size(cv2, win, (display.shape[1], display.shape[0]))
         canvas_size = (win_w, win_h)
         canvas, video_rect = letterbox(cv2, display, win_w, win_h)
-        targets = layout_targets(cv2, win_w, win_h, tokens, worker.use_llm, fullscreen, listening)
+        targets = layout_targets(cv2, win_w, win_h, tokens, listening, paused)
         draw_ui(cv2, canvas, video_rect, hands, mirror, targets, worker, sentence,
                 hover.key if hover else None, progress, cursor,
                 listener if listening else None)
+        if history_pub is not None:
+            history = list(worker.history)
+            history_json = json.dumps(history)
+            if history_json != published_history:
+                history_pub.publish(history)
+                published_history = history_json
         cv2.imshow(win, canvas)
 
         # mouse and keyboard still work as an alternative to gestures
@@ -1119,6 +1654,20 @@ def main() -> None:
             break
 
     cap.release()
+    if head_tracker is not None:
+        head_tracker.release()
+    if base_tracker is not None:
+        base_tracker.release()
+    if head_state is not None:
+        head_state.release()
+    if history_pub is not None:
+        history_pub.release()
+    if nav_process is not None:
+        nav_process.terminate()
+        try:
+            nav_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            nav_process.kill()
     cv2.destroyAllWindows()
 
 

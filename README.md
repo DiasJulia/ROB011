@@ -187,6 +187,16 @@ Run `python signvoice.py --help` for the full list.
 | `--dwell S` | `1.0` | Seconds to hold over a button before it fires |
 | `--silence S` | `1.5` | Seconds with hands down before the sentence is spoken |
 | `--no-face` | off | Disable face tracking (faster, slightly less accurate) |
+| `--ros-camera` | off | Use the ROS/rosbridge camera instead of a local webcam |
+| `--track-person` | off | Track the person's vertical position with the head and torso lift |
+| `--track-base` | off | Use the base to keep the person centered horizontally |
+| `--base-command-topic TOPIC` | `/face_tracking_vel` | ROS `Twist` topic for automatic base tracking; use `/key_vel` with the current TIAGo mux |
+| `--nav-server` | off | Start the Windows phone navigation server |
+| `--nav-port PORT` | `8080` | HTTP port used by the phone navigation server |
+| `--nav-command-topic TOPIC` | `/phone_vel` | ROS `Twist` topic for manual phone navigation |
+| `--infer-every S` | `0.5` | Minimum time in seconds between sign inferences |
+| `--no-band` | off | Accept only stable/high-confidence signs; ignore lower-confidence band results |
+| `--track-deadzone VALUE` | `0.18` | Vertical face-position margin ignored by head tracking |
 | `--swap-hands` | off | Swap left/right hands if recognition is poor |
 | `--verbose` | off | Print the top-3 guesses of every inference |
 
@@ -207,6 +217,45 @@ Run `python signvoice.py --help` for the full list.
   download is discarded automatically.
 
 ---
+
+## Recommended TIAGo configuration
+
+The following Windows command uses the ROS camera, vertical head and torso
+tracking, horizontal base centering, the phone navigation server, fullscreen
+display, slower inference to reduce CPU usage, and stable/high-confidence
+signs only:
+
+```powershell
+python signvoice.py `
+  --ros-camera `
+  --track-person `
+  --track-base `
+  --base-command-topic /key_vel `
+  --nav-server `
+  --fullscreen `
+  --infer-every 0.8 `
+  --no-band
+```
+
+Parameter details:
+
+- `--ros-camera`: receives the camera stream from ROS through rosbridge.
+- `--track-person`: tracks the face vertically with the head and torso lift.
+- `--track-base`: makes small angular corrections with the mobile base to
+  center the person horizontally.
+- `--base-command-topic /key_vel`: publishes automatic base corrections on
+  `/key_vel`, which is already accepted by the TIAGo `twist_mux`.
+- `--nav-server`: starts the phone navigation server on the Windows PC.
+- `--fullscreen`: starts the camera window in fullscreen mode.
+- `--infer-every 0.8`: waits at least 0.8 seconds between sign inferences,
+  reducing processing load while keeping the camera loop active.
+- `--no-band`: accepts only stable signs above the higher confidence threshold;
+  lower-confidence `band` results are ignored.
+
+The phone opens the navigation page at `http://<PC-IP>:8080`. Use
+`NAVIGATION: ON` for manual navigation through `/phone_vel`, or
+`NAVIGATION: OFF` to disable the manual topic and let the automatic base
+tracking use `/key_vel`.
 
 ## Credits
 

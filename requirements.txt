@@ -1,5 +1,6 @@
 mediapipe>=0.10.20
 opencv-python>=4.9
+websocket-client>=1.8
 onnxruntime>=1.18
 numpy>=1.26
 # modo escuta (microfone -> texto)
